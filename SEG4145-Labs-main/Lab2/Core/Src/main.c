@@ -22,10 +22,12 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "task.h"
 #include "stdio.h"
 #include "string.h"
 #include "fonts.h"
 #include "ssd1306.h"
+#include "semphr.h"
 
 /* USER CODE END Includes */
 
@@ -51,20 +53,25 @@ I2C_HandleTypeDef hi2c1;
 
 UART_HandleTypeDef huart2;
 
-/* Definitions for OLEDTask */
-osThreadId_t OLEDTaskHandle;
-const osThreadAttr_t OLEDTask_attributes = {
-  .name = "OLEDTask",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityHigh,
-};
-/* Definitions for VoltageTask */
-osThreadId_t VoltageTaskHandle;
-const osThreadAttr_t VoltageTask_attributes = {
-  .name = "VoltageTask",
+/* Definitions for adcTask */
+osThreadId_t adcTaskHandle;
+const osThreadAttr_t adcTask_attributes = {
+  .name = "adcTask",
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
+/* Definitions for oledTask */
+osThreadId_t oledTaskHandle;
+const osThreadAttr_t oledTask_attributes = {
+  .name = "oledTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
+//Declare semaphore variables
+SemaphoreHandle_t xBinarySemaphore1;
+SemaphoreHandle_t xBinarySemaphore2;
+
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -72,20 +79,21 @@ const osThreadAttr_t VoltageTask_attributes = {
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_ADC1_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_ADC1_Init(void);
 static void MX_I2C1_Init(void);
 void StartTask01(void *argument);
 void StartTask02(void *argument);
 
 /* USER CODE BEGIN PFP */
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-//uint32_t sensorValue = 0, value = 0;
 uint32_t sensorValue = 0;
 float fvoltage = 0;
+char msg[100];
 
 int uart2_write(int ch)
 {
@@ -112,7 +120,6 @@ int __io_putchar(int ch)
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -133,19 +140,25 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_ADC1_Init();
   MX_USART2_UART_Init();
+  MX_ADC1_Init();
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
-  SSD1306_Init();
-  SSD1306_Clear();
-  SSD1306_GotoXY(0, 0);
-  SSD1306_Puts("Voltage: ", &Font_11x18, 1);
-  MX_I2C1_Init();
+
   HAL_ADC_Start(&hadc1);
 
+  SSD1306_Init();
 
   /* USER CODE END 2 */
+
+  //Enter binary semapohores
+  xBinarySemaphore1= xSemaphoreCreateBinary();
+  xBinarySemaphore2 = xSemaphoreCreateBinary();
+
+  xSemaphoreGive(xBinarySemaphore1);
+//  xSemaphoreGive(xBinarySemaphore2);
+
+
 
   /* Init scheduler */
   osKernelInitialize();
@@ -153,6 +166,8 @@ int main(void)
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
   /* USER CODE END RTOS_MUTEX */
+
+  /* Create the semaphores(s) */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   /* add semaphores, ... */
@@ -167,11 +182,15 @@ int main(void)
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  /* creation of OLEDTask */
-  OLEDTaskHandle = osThreadNew(StartTask02, NULL, &OLEDTask_attributes);
+  /* creation of adcTask */
+  TaskHandle_t xHandle = NULL;
+  TaskHandle_t xHandle2 = NULL;
 
-  /* creation of VoltageTask */
-  VoltageTaskHandle = osThreadNew(StartTask01, NULL, &VoltageTask_attributes);
+  adcTaskHandle = xTaskCreate(StartTask01, "adcTask", 128 * 4, (void *) 1, 2, &xHandle);
+
+  /* creation of oledTask */
+
+  oledTaskHandle = xTaskCreate(StartTask02, "oledtask", 128 * 4, (void *)1, 2, &xHandle2);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -184,6 +203,7 @@ int main(void)
   /* Start scheduler */
   osKernelStart();
 
+
   /* We should never get here as control is now taken by the scheduler */
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -192,19 +212,6 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-
-	  /*1. Start ADC */
-
-
-	  //HAL_Delay(1);
-
-	  /*sprintf(msg, "%hu\r\n", raw);
-	  HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
-*/
-	  //HAL_Delay(1000);
-
-
-	  //HAL_Delay(1000);
   }
   /* USER CODE END 3 */
 }
@@ -231,9 +238,9 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 8;
-  RCC_OscInitStruct.PLL.PLLN = 64;
-  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLM = 16;
+  RCC_OscInitStruct.PLL.PLLN = 336;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;
   RCC_OscInitStruct.PLL.PLLQ = 2;
   RCC_OscInitStruct.PLL.PLLR = 2;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
@@ -280,7 +287,7 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
   hadc1.Init.ScanConvMode = DISABLE;
-  hadc1.Init.ContinuousConvMode = ENABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
@@ -382,6 +389,7 @@ static void MX_USART2_UART_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
 /* USER CODE BEGIN MX_GPIO_Init_1 */
 /* USER CODE END MX_GPIO_Init_1 */
 
@@ -391,6 +399,22 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : B1_Pin */
+  GPIO_InitStruct.Pin = B1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : LD2_Pin */
+  GPIO_InitStruct.Pin = LD2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
+
 /* USER CODE BEGIN MX_GPIO_Init_2 */
 /* USER CODE END MX_GPIO_Init_2 */
 }
@@ -399,60 +423,72 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE END 4 */
 
-/* USER CODE BEGIN Header_StartTask01 */
+/* USER CODE BEGIN StartTask01 */
 /**
-  * @brief  Function implementing the OLEDTask thread.
+  * @brief  Function implementing the adcTask thread.
   * @param  argument: Not used
   * @retval None
   */
-/* USER CODE END Header_StartTask01 */
+/* USER CODE END StartTask01 */
 void StartTask01(void *argument)
 {
   /* USER CODE BEGIN 5 */
   /* Infinite loop */
   for(;;)
   {
-	  HAL_ADC_Start(&hadc1);
+	  /*1. Start ADC */
+    if( xSemaphoreTake( xBinarySemaphore1, ( TickType_t ) 100 ) == pdTRUE )
+    {
+      HAL_ADC_Start(&hadc1);
 
-		 /*2. Poll for conversion */
-		 HAL_ADC_PollForConversion(&hadc1,1);
+      /* Poll for conversion */
+      HAL_ADC_PollForConversion(&hadc1,1);
 
-		 /*3. Get conversion */
-		 sensorValue = HAL_ADC_GetValue(&hadc1);
-		 fvoltage = (float)sensorValue * (3.3/4095.0);
+      /* Get conversion */
+      sensorValue = HAL_ADC_GetValue(&hadc1);
+      fvoltage = (float)sensorValue * (3.3/4095.0);
 
-		 HAL_Delay(500);
+      sprintf(msg, "%.1f V\r\n", fvoltage); //One digit after comma
+
+      xSemaphoreGive(xBinarySemaphore2);
+    }
   }
   /* USER CODE END 5 */
 }
 
-/* USER CODE BEGIN Header_StartTask02 */
+/* USER CODE BEGIN StartTask01 */
 /**
-* @brief Function implementing the VoltageTask thread.
+* @brief Function implementing the oledTask thread.
 * @param argument: Not used
 * @retval None
 */
-/* USER CODE END Header_StartTask02 */
+/* USER CODE END StartTask01 */
 void StartTask02(void *argument)
 {
-  /* USER CODE BEGIN StartTask02 */
+  /* USER CODE BEGIN StartTask01 */
   /* Infinite loop */
   for(;;)
   {
-	  SSD1306_Clear();
-		  char finalString[10];
-		  sprintf(finalString, "%.3f V", fvoltage);
-		  SSD1306_GotoXY(0, 0);
-		  SSD1306_Puts(finalString, &Font_16x26, 1);
-		  SSD1306_UpdateScreen();
-		  osDelay(1000);
+    // Try to take the semaphore xBinarySemaphore2. Wait for up to 100 ticks.
+	 	 if( xSemaphoreTake( xBinarySemaphore2, ( TickType_t ) 100 ) == pdTRUE )
+     {
+        SSD1306_GotoXY (0, 30);
+
+        HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY); // Transmit the 'msg' string via UART
+
+        SSD1306_Puts(msg, &Font_16x26, 1); // Display 'msg' on the OLED with specified font and size
+
+        SSD1306_UpdateScreen(); // Refresh the OLED display to show the new text
+
+        xSemaphoreGive(xBinarySemaphore1);
+     }
   }
-  /* USER CODE END StartTask02 */
+  /* USER CODE END StartTask01 */
 }
 
 /**
   * @brief  Period elapsed callback in non blocking mode
-  * @note   This function is called  when TIM1 interrupt took place, inside
+  * @note   This function is called  when TIM6 interrupt took place, inside
   * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
   * a global variable "uwTick" used as application time base.
   * @param  htim : TIM handle
@@ -463,7 +499,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   /* USER CODE BEGIN Callback 0 */
 
   /* USER CODE END Callback 0 */
-  if (htim->Instance == TIM1) {
+  if (htim->Instance == TIM6) {
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
